@@ -13,7 +13,7 @@ import streamlit as st
 from screener.config import N_HOT_SECTORS, RS_STOCK_MIN, RSI_MIN, RSI_MAX, BREADTH_THRESHOLD
 from screener.data import fetch_spy
 from screener.sector_engine import build_sector_table
-from screener.signal_engine import run_screener, SignalResult
+from screener.signal_engine import run_screener, run_proximity_scanner, SignalResult, ProximityResult
 from screener.news_scanner import render_news_scanner
 
 logging.basicConfig(level=logging.WARNING)
@@ -42,39 +42,49 @@ st.markdown("""
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Screener Controls")
-    st.caption("Paper mode — thresholds relaxed vs live bot")
 
-    n_hot = st.slider(
-        "Sectors to Scan",
-        min_value=1, max_value=22, value=N_HOT_SECTORS,
-        help="Number of sectors to scan by RS rank. Set to 22 to scan all."
+    scanner_mode = st.radio(
+        "Scanner Mode",
+        ["🔥 Hot Theme Signals", "📍 52-Week High Proximity"],
+        help=(
+            "**Hot Theme**: full 10-filter signal stack (sector RS, RSI, Trend Template, VCP, ATR R:R)\n\n"
+            "**52-Week High Proximity**: standalone scan — finds every stock within X% of its yearly high, no other filters"
+        ),
     )
     st.divider()
-    st.subheader("Threshold Overrides")
-    rs_min = st.number_input("Min Stock RS", min_value=0.8, max_value=2.0,
-                             value=float(RS_STOCK_MIN), step=0.05)
-    rsi_lo = st.number_input("RSI Min", min_value=30, max_value=65, value=RSI_MIN)
-    rsi_hi = st.number_input("RSI Max", min_value=60, max_value=85, value=RSI_MAX)
-    breadth_thresh = st.slider(
-        "Breadth Threshold", min_value=0.20, max_value=0.90,
-        value=float(BREADTH_THRESHOLD), step=0.05,
-        help="% stocks above 50d SMA required for sector to qualify"
-    )
-    st.divider()
-    st.subheader("52-Week High Filter")
-    near_52w_filter = st.checkbox("Only stocks near 52W high", value=False)
-    near_52w_threshold = st.slider(
-        "Max % below 52W high", min_value=0, max_value=40, value=5,
-        help="0% = at the high, 5% = within 5% of high",
-        disabled=not near_52w_filter,
-    )
+
+    if scanner_mode == "🔥 Hot Theme Signals":
+        st.caption("Paper mode — thresholds relaxed vs live bot")
+        n_hot = st.slider(
+            "Sectors to Scan",
+            min_value=1, max_value=22, value=N_HOT_SECTORS,
+            help="Number of sectors to scan by RS rank. Set to 22 to scan all."
+        )
+        st.subheader("Threshold Overrides")
+        rs_min = st.number_input("Min Stock RS", min_value=0.8, max_value=2.0,
+                                 value=float(RS_STOCK_MIN), step=0.05)
+        rsi_lo = st.number_input("RSI Min", min_value=30, max_value=65, value=RSI_MIN)
+        rsi_hi = st.number_input("RSI Max", min_value=60, max_value=85, value=RSI_MAX)
+        breadth_thresh = st.slider(
+            "Breadth Threshold", min_value=0.20, max_value=0.90,
+            value=float(BREADTH_THRESHOLD), step=0.05,
+            help="% stocks above 50d SMA required for sector to qualify"
+        )
+    else:
+        st.caption("Find stocks trading near their 52-week high")
+        proximity_pct = st.slider(
+            "Max % below 52W high",
+            min_value=1, max_value=40, value=5,
+            help="5 = within 5% of the 52-week high. Sorted closest-first."
+        )
+
     st.divider()
     run_btn = st.button("🔍 Run Screener", type="primary", use_container_width=True)
     st.caption("Data cached 30 min. Click to refresh.")
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("🔥 Hot Theme Stock Screener")
-st.caption("Sector RS ranking | Minervini Trend Template | VCP + ATR signal stack")
+st.caption("Sector RS ranking | Minervini Trend Template | VCP + ATR signal stack | 52-Week High Proximity")
 
 # ── Session State ─────────────────────────────────────────────────────────────
 if "results" not in st.session_state:
@@ -85,13 +95,24 @@ if "last_run" not in st.session_state:
     st.session_state.last_run = None
 if "stats" not in st.session_state:
     st.session_state.stats = {}
+if "scanner_mode_run" not in st.session_state:
+    st.session_state.scanner_mode_run = None
 
 
-def _row_color(r: SignalResult) -> str:
-    """Return color tag for result row."""
+# ── Helper functions ──────────────────────────────────────────────────────────
+
+def _row_color_signal(r: SignalResult) -> str:
     if r.tt_score >= 4 and r.filters.get("vcp"):
         return "🟢"
     elif r.score >= 3:
+        return "🟡"
+    return "⬜"
+
+
+def _row_color_proximity(r: ProximityResult) -> str:
+    if r.pct_from_high <= 0.01:
+        return "🟢"
+    elif r.pct_from_high <= 0.03:
         return "🟡"
     return "⬜"
 
@@ -108,17 +129,15 @@ def _fmt_mcap(val) -> str:
     return f"${val:,.0f}"
 
 
-def results_to_df(results: list[SignalResult]) -> pd.DataFrame:
+def signal_results_to_df(results: list[SignalResult]) -> pd.DataFrame:
     rows = []
     for r in results:
-        pct_high = r.pct_from_52w_high
         rows.append({
-            "": _row_color(r),
+            "": _row_color_signal(r),
             "Symbol": r.symbol,
             "Sector": r.sector,
             "Mkt Cap ($B)": (r.market_cap / 1e9) if r.market_cap is not None else float("nan"),
             "Price": r.price,
-            "% From 52W High": round(pct_high * 100, 1) if pct_high is not None else float("nan"),
             "RSI": r.rsi,
             "RS vs SPY": r.rs,
             "TT Score": f"{r.tt_score}/4",
@@ -127,6 +146,22 @@ def results_to_df(results: list[SignalResult]) -> pd.DataFrame:
             "Target": r.target,
             "R:R": r.rr,
             "Score": r.score,
+        })
+    return pd.DataFrame(rows)
+
+
+def proximity_results_to_df(results: list[ProximityResult]) -> pd.DataFrame:
+    rows = []
+    for r in results:
+        rows.append({
+            "": _row_color_proximity(r),
+            "Symbol": r.symbol,
+            "Sector": r.sector,
+            "ETF": r.etf,
+            "Mkt Cap ($B)": (r.market_cap / 1e9) if r.market_cap is not None else float("nan"),
+            "Price": r.price,
+            "52W High": r.high_52w,
+            "% From High": round(r.pct_from_high * 100, 2),
         })
     return pd.DataFrame(rows)
 
@@ -154,39 +189,56 @@ if run_btn:
     def update_progress(pct: float, msg: str):
         progress_bar.progress(pct, text=msg)
 
-    with st.spinner("Fetching market data..."):
-        update_progress(0.05, "Fetching SPY data...")
-        spy_data = fetch_spy()
+    st.session_state.scanner_mode_run = scanner_mode
 
-        if spy_data is None:
-            st.error("Failed to fetch SPY data. Check your internet connection.")
-            st.stop()
+    if scanner_mode == "🔥 Hot Theme Signals":
+        with st.spinner("Fetching market data..."):
+            update_progress(0.05, "Fetching SPY data...")
+            spy_data = fetch_spy()
 
-        update_progress(0.10, "Building sector leaderboard...")
-        sector_table = build_sector_table(spy_data, n_hot)
-        st.session_state.sector_table = sector_table
+            if spy_data is None:
+                st.error("Failed to fetch SPY data. Check your internet connection.")
+                st.stop()
 
-        # Apply breadth threshold override
-        if not sector_table.empty:
-            sector_table["breadth_ok"] = sector_table["breadth_pct"].apply(
-                lambda x: (x is not None) and (x / 100 >= breadth_thresh)
+            update_progress(0.10, "Building sector leaderboard...")
+            sector_table = build_sector_table(spy_data, n_hot)
+            st.session_state.sector_table = sector_table
+
+            if not sector_table.empty:
+                sector_table["breadth_ok"] = sector_table["breadth_pct"].apply(
+                    lambda x: (x is not None) and (x / 100 >= breadth_thresh)
+                )
+
+            results, total_scanned = run_screener(
+                spy_data=spy_data,
+                sector_table=sector_table,
+                n_hot=n_hot,
+                progress_callback=update_progress,
             )
+            st.session_state.results = results
+            elapsed = round(time.time() - start_time, 1)
+            st.session_state.last_run = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.session_state.stats = {
+                "total_scanned": total_scanned,
+                "signals_found": len(results),
+                "elapsed": elapsed,
+            }
 
-        # Run signals
-        results, total_scanned = run_screener(
-            spy_data=spy_data,
-            sector_table=sector_table,
-            n_hot=n_hot,
-            progress_callback=update_progress,
-        )
-        st.session_state.results = results
-        elapsed = round(time.time() - start_time, 1)
-        st.session_state.last_run = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        st.session_state.stats = {
-            "total_scanned": total_scanned,
-            "signals_found": len(results),
-            "elapsed": elapsed,
-        }
+    else:  # 52-Week High Proximity
+        with st.spinner("Scanning for stocks near 52-week highs..."):
+            results, total_scanned = run_proximity_scanner(
+                threshold=proximity_pct / 100.0,
+                progress_callback=update_progress,
+            )
+            st.session_state.results = results
+            st.session_state.sector_table = None
+            elapsed = round(time.time() - start_time, 1)
+            st.session_state.last_run = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.session_state.stats = {
+                "total_scanned": total_scanned,
+                "signals_found": len(results),
+                "elapsed": elapsed,
+            }
 
     progress_bar.progress(1.0, text="Done!")
     time.sleep(0.3)
@@ -199,27 +251,9 @@ if run_btn:
 tab_screener, tab_news = st.tabs(["📊 Stock Screener", "📡 News Scanner"])
 
 with tab_screener:
-    # 1) Sector Leaderboard
-    st.subheader("🏆 Sector Leaderboard")
-    if st.session_state.sector_table is not None and not st.session_state.sector_table.empty:
-        display_df = sector_table_display(st.session_state.sector_table)
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "#": st.column_config.NumberColumn(width="small"),
-                "RS Score": st.column_config.NumberColumn(format="%.3f"),
-                "Status": st.column_config.TextColumn(width="medium"),
-            },
-        )
-        st.caption("🔥 HOT = top-N ranked; RS Score = 0.6×(3mo RS) + 0.4×(6mo RS) vs SPY")
-    else:
-        st.info("Sector data will appear after running the screener.")
+    mode_run = st.session_state.scanner_mode_run
 
-    # 2) Screener Results
-    st.subheader("🎯 Screener Results")
-
+    # Stats row (shown for both modes)
     if st.session_state.stats:
         s = st.session_state.stats
         c1, c2, c3, c4 = st.columns(4)
@@ -228,72 +262,120 @@ with tab_screener:
         c3.metric("Time Elapsed", f"{s.get('elapsed', 0)}s")
         c4.metric("Last Updated", st.session_state.last_run or "—")
 
-    if st.session_state.results is not None:
-        results = st.session_state.results
-
-        # Apply 52W high filter if enabled
-        if near_52w_filter and results:
-            threshold = near_52w_threshold / 100.0
-            results = [
-                r for r in results
-                if r.pct_from_52w_high is not None and r.pct_from_52w_high <= threshold
-            ]
-
-        if not results:
-            st.warning("No stocks passed all 10 filters. Try relaxing thresholds or increasing N_HOT_SECTORS.")
-        else:
-            results_df = results_to_df(results)
-
+    if mode_run == "🔥 Hot Theme Signals":
+        # Sector Leaderboard
+        st.subheader("🏆 Sector Leaderboard")
+        if st.session_state.sector_table is not None and not st.session_state.sector_table.empty:
+            display_df = sector_table_display(st.session_state.sector_table)
             st.dataframe(
-                results_df,
+                display_df,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "": st.column_config.TextColumn("", width="small"),
-                    "Mkt Cap ($B)": st.column_config.NumberColumn(
-                        "Mkt Cap ($B)",
-                        help="Market cap in billions — click header to sort smallest→largest",
-                        format="$%.2fB",
-                        width="medium",
-                    ),
-                    "Price": st.column_config.NumberColumn(format="$%.2f"),
-                    "% From 52W High": st.column_config.NumberColumn(
-                        "% From 52W High",
-                        help="0% = at the 52-week high, 15% = 15% below it",
-                        format="%.1f%%",
-                        width="medium",
-                    ),
-                    "RS vs SPY": st.column_config.NumberColumn(format="%.3f"),
-                    "ATR Stop": st.column_config.NumberColumn(format="$%.2f"),
-                    "Target": st.column_config.NumberColumn(format="$%.2f"),
-                    "R:R": st.column_config.NumberColumn(format="%.1f"),
-                    "Score": st.column_config.ProgressColumn(
-                        "Score", min_value=0, max_value=5, format="%d"
-                    ),
+                    "#": st.column_config.NumberColumn(width="small"),
+                    "RS Score": st.column_config.NumberColumn(format="%.3f"),
+                    "Status": st.column_config.TextColumn(width="medium"),
                 },
             )
+            st.caption("🔥 HOT = top-N ranked; RS Score = 0.6×(3mo RS) + 0.4×(6mo RS) vs SPY")
+        else:
+            st.info("Sector data will appear after running the screener.")
 
-            st.caption("🟢 Strong signal (VCP + TT 4/4)  |  🟡 Moderate  |  ⬜ Base pass")
+        # Signal results
+        st.subheader("🎯 Signal Results")
+        if st.session_state.results is not None:
+            results = st.session_state.results
+            if not results:
+                st.warning("No stocks passed all filters. Try relaxing thresholds or increasing Sectors to Scan.")
+            else:
+                results_df = signal_results_to_df(results)
+                st.dataframe(
+                    results_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "": st.column_config.TextColumn("", width="small"),
+                        "Mkt Cap ($B)": st.column_config.NumberColumn(
+                            "Mkt Cap ($B)",
+                            help="Market cap in billions",
+                            format="$%.2fB",
+                            width="medium",
+                        ),
+                        "Price": st.column_config.NumberColumn(format="$%.2f"),
+                        "RS vs SPY": st.column_config.NumberColumn(format="%.3f"),
+                        "ATR Stop": st.column_config.NumberColumn(format="$%.2f"),
+                        "Target": st.column_config.NumberColumn(format="$%.2f"),
+                        "R:R": st.column_config.NumberColumn(format="%.1f"),
+                        "Score": st.column_config.ProgressColumn(
+                            "Score", min_value=0, max_value=5, format="%d"
+                        ),
+                    },
+                )
+                st.caption("🟢 Strong signal (VCP + TT 4/4)  |  🟡 Moderate  |  ⬜ Base pass")
 
-            # Download CSV
-            csv_data = results_df.drop(columns=[""]).to_csv(index=False)
-            st.download_button(
-                label="⬇️ Download CSV",
-                data=csv_data,
-                file_name=f"screener_results_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                mime="text/csv",
-            )
+                csv_data = results_df.drop(columns=[""]).to_csv(index=False)
+                st.download_button(
+                    label="⬇️ Download CSV",
+                    data=csv_data,
+                    file_name=f"hot_theme_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                    mime="text/csv",
+                )
 
-            # Filter breakdown expander
-            with st.expander("🔬 Filter Breakdown"):
-                breakdown_rows = []
-                for r in results:
-                    row = {"Symbol": r.symbol, "Sector": r.sector}
-                    row.update({k: ("✅" if v else "❌") for k, v in r.filters.items()})
-                    breakdown_rows.append(row)
-                st.dataframe(pd.DataFrame(breakdown_rows), use_container_width=True, hide_index=True)
+                with st.expander("🔬 Filter Breakdown"):
+                    breakdown_rows = []
+                    for r in results:
+                        row = {"Symbol": r.symbol, "Sector": r.sector}
+                        row.update({k: ("✅" if v else "❌") for k, v in r.filters.items()})
+                        breakdown_rows.append(row)
+                    st.dataframe(pd.DataFrame(breakdown_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("Click **Run Screener** in the sidebar to begin scanning.")
+
+    elif mode_run == "📍 52-Week High Proximity":
+        st.subheader("📍 52-Week High Proximity Results")
+        st.caption("Stocks sorted by closeness to their 52-week high — no other filters applied")
+
+        if st.session_state.results is not None:
+            results = st.session_state.results
+            if not results:
+                st.warning("No stocks found within that threshold. Try increasing the % below 52W high.")
+            else:
+                results_df = proximity_results_to_df(results)
+                st.dataframe(
+                    results_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "": st.column_config.TextColumn("", width="small"),
+                        "Mkt Cap ($B)": st.column_config.NumberColumn(
+                            "Mkt Cap ($B)",
+                            format="$%.2fB",
+                            width="medium",
+                        ),
+                        "Price": st.column_config.NumberColumn(format="$%.2f"),
+                        "52W High": st.column_config.NumberColumn(format="$%.2f"),
+                        "% From High": st.column_config.NumberColumn(
+                            "% From High",
+                            help="0% = at the 52-week high",
+                            format="%.2f%%",
+                            width="small",
+                        ),
+                    },
+                )
+                st.caption("🟢 Within 1% of high  |  🟡 Within 3%  |  ⬜ Within threshold")
+
+                csv_data = results_df.drop(columns=[""]).to_csv(index=False)
+                st.download_button(
+                    label="⬇️ Download CSV",
+                    data=csv_data,
+                    file_name=f"52w_proximity_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                    mime="text/csv",
+                )
+        else:
+            st.info("Click **Run Screener** in the sidebar to begin scanning.")
+
     else:
-        st.info("Click **Run Screener** in the sidebar to begin scanning.")
+        st.info("Select a scanner mode in the sidebar and click **Run Screener** to begin.")
 
 with tab_news:
     render_news_scanner()
@@ -302,6 +384,6 @@ with tab_news:
 st.divider()
 st.caption(
     "📋 Paper mode — thresholds relaxed vs live bot  |  "
-    "Data via Alpaca  |  Not financial advice  |  "
-    "Filters: Sector RS · Breadth · Stock RS · RSI · MACD · Price/MA/ROC · VPA · VCP · Trend Template · ATR R:R"
+    "Data via yfinance / Alpaca  |  Not financial advice  |  "
+    "Hot Theme filters: Sector RS · Breadth · Stock RS · RSI · MACD · Price/MA/ROC · VPA · VCP · Trend Template · ATR R:R"
 )

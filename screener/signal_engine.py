@@ -1,4 +1,4 @@
-# screener/signal_engine.py — Full 10-filter buy signal logic
+# screener/signal_engine.py — Full 10-filter buy signal logic + 52W proximity scanner
 
 import logging
 import time
@@ -12,6 +12,7 @@ from screener.config import (
     SPY_MA_PERIOD,
     RS_STOCK_MIN,
     BREADTH_THRESHOLD,
+    SECTOR_ETFS,
     SECTOR_TICKERS,
 )
 from screener.data import fetch_daily, fetch_weekly, get_close
@@ -31,6 +32,8 @@ from screener.indicators import (
 logger = logging.getLogger(__name__)
 
 
+# ── Hot Theme signal result ────────────────────────────────────────────────────
+
 @dataclass
 class SignalResult:
     symbol: str
@@ -45,13 +48,26 @@ class SignalResult:
     target: float
     rr: float
     market_cap: Optional[float] = None
-    # 52-week high proximity (0.0 = AT the high, 0.15 = 15% below)
-    pct_from_52w_high: Optional[float] = None
     # Composite score: higher = stronger signal
     score: int = 0
     # Filter breakdown
     filters: dict = field(default_factory=dict)
 
+
+# ── 52-Week High Proximity result ──────────────────────────────────────────────
+
+@dataclass
+class ProximityResult:
+    symbol: str
+    sector: str
+    etf: str
+    price: float
+    high_52w: float
+    pct_from_high: float   # 0.0 = AT the high, 0.05 = 5% below
+    market_cap: Optional[float] = None
+
+
+# ── Shared utilities ───────────────────────────────────────────────────────────
 
 def check_spy_regime(spy_data: pd.DataFrame) -> tuple[bool, float, float]:
     """
@@ -68,6 +84,20 @@ def check_spy_regime(spy_data: pd.DataFrame) -> tuple[bool, float, float]:
         logger.warning(f"Regime check failed: {e}")
         return False, float("nan"), float("nan")
 
+
+def _fetch_market_caps(symbols: tuple[str, ...]) -> dict[str, Optional[float]]:
+    """Fetch market caps using yfinance fast_info for speed."""
+    caps: dict[str, Optional[float]] = {}
+    for sym in symbols:
+        try:
+            fi = yf.Ticker(sym).fast_info
+            caps[sym] = getattr(fi, "market_cap", None)
+        except Exception:
+            caps[sym] = None
+    return caps
+
+
+# ── Hot Theme signal stack ─────────────────────────────────────────────────────
 
 def _score_signal(result: SignalResult) -> int:
     """
@@ -160,10 +190,6 @@ def scan_ticker(
     if not filters["atr_rr"]:
         return None
 
-    # ── 52-week high proximity ────────────────────────────────────────────────
-    high_52w = float(close.tail(252).max())
-    pct_from_high = round((high_52w - price) / high_52w, 4) if high_52w > 0 else None
-
     result = SignalResult(
         symbol=symbol,
         sector=sector,
@@ -176,7 +202,6 @@ def scan_ticker(
         atr_stop=stop,
         target=target,
         rr=rr,
-        pct_from_52w_high=pct_from_high,
         filters=filters,
     )
     result.score = _score_signal(result)
@@ -256,13 +281,83 @@ def run_screener(
     return results, total
 
 
-def _fetch_market_caps(symbols: tuple[str, ...]) -> dict[str, Optional[float]]:
-    """Fetch market caps using yfinance fast_info for speed."""
-    caps: dict[str, Optional[float]] = {}
-    for sym in symbols:
+# ── 52-Week High Proximity Scanner ─────────────────────────────────────────────
+
+def run_proximity_scanner(
+    threshold: float = 0.05,
+    progress_callback=None,
+) -> tuple[list[ProximityResult], int]:
+    """
+    Standalone scanner: returns stocks within threshold% of their 52-week high.
+    Scans the full sector universe. No SPY regime, RS, RSI, or other filters.
+
+    Args:
+        threshold: Maximum fractional distance from 52w high (0.05 = within 5%).
+        progress_callback: Optional (pct: float, msg: str) -> None callback.
+
+    Returns:
+        (results sorted by proximity ascending, total tickers checked)
+    """
+    # Build deduplicated ticker → (etf, sector) map across all sectors
+    ticker_to_sector: dict[str, tuple[str, str]] = {}
+    for etf, sector_name in SECTOR_ETFS.items():
+        for sym in SECTOR_TICKERS.get(etf, []):
+            if sym not in ticker_to_sector:
+                ticker_to_sector[sym] = (etf, sector_name)
+
+    all_tickers = tuple(sorted(ticker_to_sector.keys()))
+    total = len(all_tickers)
+
+    if total == 0:
+        return [], 0
+
+    if progress_callback:
+        progress_callback(0.1, f"Fetching price history for {total} tickers...")
+    daily_data = fetch_daily(all_tickers)
+
+    results: list[ProximityResult] = []
+    for i, sym in enumerate(all_tickers):
+        if progress_callback and i % 20 == 0:
+            pct = 0.2 + 0.75 * (i / total)
+            progress_callback(pct, f"Checking {sym} ({i+1}/{total})...")
+
+        if sym not in daily_data:
+            continue
+        df = daily_data[sym]
         try:
-            fi = yf.Ticker(sym).fast_info
-            caps[sym] = getattr(fi, "market_cap", None)
+            close = get_close(df)
         except Exception:
-            caps[sym] = None
-    return caps
+            continue
+
+        if len(close) < 60:
+            continue
+
+        price = float(close.iloc[-1])
+        high_52w = float(close.tail(252).max())
+        if high_52w <= 0:
+            continue
+
+        pct_from_high = (high_52w - price) / high_52w
+        if pct_from_high <= threshold:
+            etf, sector = ticker_to_sector[sym]
+            results.append(ProximityResult(
+                symbol=sym,
+                sector=sector,
+                etf=etf,
+                price=round(price, 2),
+                high_52w=round(high_52w, 2),
+                pct_from_high=round(pct_from_high, 4),
+            ))
+
+    # Sort closest-to-high first
+    results.sort(key=lambda r: r.pct_from_high)
+
+    if results:
+        if progress_callback:
+            progress_callback(0.97, "Fetching market caps...")
+        passing_syms = tuple(r.symbol for r in results)
+        mcaps = _fetch_market_caps(passing_syms)
+        for r in results:
+            r.market_cap = mcaps.get(r.symbol)
+
+    return results, total
