@@ -15,6 +15,7 @@ from screener.data import fetch_spy
 from screener.sector_engine import build_sector_table
 from screener.signal_engine import run_screener, run_proximity_scanner, SignalResult, ProximityResult
 from screener.news_scanner import render_news_scanner
+from screener.universe import get_universe, universe_cache_info
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -77,6 +78,14 @@ with st.sidebar:
             min_value=1, max_value=40, value=5,
             help="5 = within 5% of the 52-week high. Sorted closest-first."
         )
+        info = universe_cache_info()
+        if info["cached"] and not info["stale"]:
+            st.caption(f"Universe: {info['count']:,} tickers · cached {info['age_hours']}h ago")
+        else:
+            st.caption("Universe: will fetch ~5 000 tickers on first run")
+        if st.button("🔄 Refresh Universe", use_container_width=True):
+            get_universe(force_refresh=True)
+            st.rerun()
 
     st.divider()
     run_btn = st.button("🔍 Run Screener", type="primary", use_container_width=True)

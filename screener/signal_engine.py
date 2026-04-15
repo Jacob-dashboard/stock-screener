@@ -283,80 +283,106 @@ def run_screener(
 
 # ── 52-Week High Proximity Scanner ─────────────────────────────────────────────
 
+_PROXIMITY_BATCH = 500   # tickers per yfinance batch download
+
+
+def _build_sector_lookup() -> dict[str, tuple[str, str]]:
+    """Build symbol → (etf, sector) from the curated SECTOR_TICKERS map."""
+    lookup: dict[str, tuple[str, str]] = {}
+    for etf, sector_name in SECTOR_ETFS.items():
+        for sym in SECTOR_TICKERS.get(etf, []):
+            if sym not in lookup:
+                lookup[sym] = (etf, sector_name)
+    return lookup
+
+
 def run_proximity_scanner(
     threshold: float = 0.05,
     progress_callback=None,
 ) -> tuple[list[ProximityResult], int]:
     """
     Standalone scanner: returns stocks within threshold% of their 52-week high.
-    Scans the full sector universe. No SPY regime, RS, RSI, or other filters.
+    Scans the full US equity universe (~5 000 tickers) via nasdaqtrader.com.
+    No SPY regime, RS, RSI, or other filters — purely proximity-based.
+
+    Downloads in batches of _PROXIMITY_BATCH to bound memory usage and give
+    fine-grained progress. Sector/ETF labels are populated for the ~400
+    curated tickers; everything else gets '—'.
 
     Args:
         threshold: Maximum fractional distance from 52w high (0.05 = within 5%).
-        progress_callback: Optional (pct: float, msg: str) -> None callback.
+        progress_callback: Optional (pct: float, msg: str) -> None.
 
     Returns:
         (results sorted by proximity ascending, total tickers checked)
     """
-    # Build deduplicated ticker → (etf, sector) map across all sectors
-    ticker_to_sector: dict[str, tuple[str, str]] = {}
-    for etf, sector_name in SECTOR_ETFS.items():
-        for sym in SECTOR_TICKERS.get(etf, []):
-            if sym not in ticker_to_sector:
-                ticker_to_sector[sym] = (etf, sector_name)
-
-    all_tickers = tuple(sorted(ticker_to_sector.keys()))
-    total = len(all_tickers)
-
-    if total == 0:
-        return [], 0
+    from screener.universe import get_universe
 
     if progress_callback:
-        progress_callback(0.1, f"Fetching price history for {total} tickers...")
-    daily_data = fetch_daily(all_tickers)
+        progress_callback(0.02, "Loading ticker universe…")
 
+    all_symbols = get_universe()
+    total = len(all_symbols)
+    if total == 0:
+        logger.warning("Universe is empty — check network access to nasdaqtrader.com")
+        return [], 0
+
+    sector_lookup = _build_sector_lookup()
     results: list[ProximityResult] = []
-    for i, sym in enumerate(all_tickers):
-        if progress_callback and i % 20 == 0:
-            pct = 0.2 + 0.75 * (i / total)
-            progress_callback(pct, f"Checking {sym} ({i+1}/{total})...")
+    n_batches = max(1, (total + _PROXIMITY_BATCH - 1) // _PROXIMITY_BATCH)
 
-        if sym not in daily_data:
-            continue
-        df = daily_data[sym]
+    for batch_idx, start in enumerate(range(0, total, _PROXIMITY_BATCH)):
+        batch = tuple(all_symbols[start : start + _PROXIMITY_BATCH])
+        end = min(start + len(batch), total)
+        pct = 0.05 + 0.87 * (start / total)
+        if progress_callback:
+            progress_callback(
+                pct,
+                f"Batch {batch_idx + 1}/{n_batches} — tickers {start + 1}–{end} of {total}…",
+            )
+
         try:
-            close = get_close(df)
-        except Exception:
+            batch_data = fetch_daily(batch)
+        except Exception as e:
+            logger.warning("Batch %d download failed: %s", batch_idx + 1, e)
             continue
 
-        if len(close) < 60:
-            continue
+        for sym in batch:
+            if sym not in batch_data:
+                continue
+            df = batch_data[sym]
+            try:
+                close = get_close(df)
+            except Exception:
+                continue
+            if len(close) < 60:
+                continue
 
-        price = float(close.iloc[-1])
-        high_52w = float(close.tail(252).max())
-        if high_52w <= 0:
-            continue
+            price = float(close.iloc[-1])
+            high_52w = float(close.tail(252).max())
+            if high_52w <= 0:
+                continue
 
-        pct_from_high = (high_52w - price) / high_52w
-        if pct_from_high <= threshold:
-            etf, sector = ticker_to_sector[sym]
-            results.append(ProximityResult(
-                symbol=sym,
-                sector=sector,
-                etf=etf,
-                price=round(price, 2),
-                high_52w=round(high_52w, 2),
-                pct_from_high=round(pct_from_high, 4),
-            ))
+            pct_from_high = (high_52w - price) / high_52w
+            if pct_from_high <= threshold:
+                etf, sector = sector_lookup.get(sym, ("—", "—"))
+                results.append(
+                    ProximityResult(
+                        symbol=sym,
+                        sector=sector,
+                        etf=etf,
+                        price=round(price, 2),
+                        high_52w=round(high_52w, 2),
+                        pct_from_high=round(pct_from_high, 4),
+                    )
+                )
 
-    # Sort closest-to-high first
     results.sort(key=lambda r: r.pct_from_high)
 
     if results:
         if progress_callback:
-            progress_callback(0.97, "Fetching market caps...")
-        passing_syms = tuple(r.symbol for r in results)
-        mcaps = _fetch_market_caps(passing_syms)
+            progress_callback(0.97, f"Fetching market caps for {len(results)} matches…")
+        mcaps = _fetch_market_caps(tuple(r.symbol for r in results))
         for r in results:
             r.market_cap = mcaps.get(r.symbol)
 
