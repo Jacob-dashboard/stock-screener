@@ -20,6 +20,7 @@ $STREAMLIT run screener/app.py \
     --server.port 8510 \
     --server.headless true \
     --theme.base dark \
-    --theme.primaryColor "#ff4b4b" \
-    --theme.backgroundColor "#0e1117" \
-    --theme.secondaryBackgroundColor "#1e2130"
+    --theme.primaryColor "#E6B800" \
+    --theme.backgroundColor "#0D1117" \
+    --theme.secondaryBackgroundColor "#161B22" \
+    --theme.textColor "#c9d1d9"

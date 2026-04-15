@@ -16,6 +16,13 @@ from screener.sector_engine import build_sector_table
 from screener.signal_engine import run_screener, run_proximity_scanner, SignalResult, ProximityResult
 from screener.news_scanner import render_news_scanner
 from screener.universe import get_universe, universe_cache_info
+from screener.breadth import (
+    render_breadth_dashboard,
+    _fetch_sp500_close,
+    _fetch_spy_1y,
+    _fetch_vix,
+)
+from screener.ui.theme import inject_theme, render_app_header, render_sidebar_brand, render_footer
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -26,30 +33,21 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Custom CSS ────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-    .metric-card {
-        background-color: #1e1e2e;
-        border-radius: 6px;
-        padding: 10px 16px;
-        margin: 4px 0;
-    }
-    .stDataFrame { font-size: 0.85em; }
-</style>
-""", unsafe_allow_html=True)
+# ── Inject custom theme CSS ───────────────────────────────────────────────────
+inject_theme()
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ Screener Controls")
+    render_sidebar_brand()
 
     scanner_mode = st.radio(
         "Scanner Mode",
-        ["🔥 Hot Theme Signals", "📍 52-Week High Proximity"],
+        ["🔥 Hot Theme Signals", "📍 52-Week High Proximity", "📊 Market Breadth"],
         help=(
             "**Hot Theme**: full 10-filter signal stack (sector RS, RSI, Trend Template, VCP, ATR R:R)\n\n"
-            "**52-Week High Proximity**: standalone scan — finds every stock within X% of its yearly high, no other filters"
+            "**52-Week High Proximity**: standalone scan — finds every stock within X% of its yearly high\n\n"
+            "**Market Breadth**: live S&P 500 breadth dashboard — T2108, A/D Line, McClellan, VIX"
         ),
     )
     st.divider()
@@ -71,7 +69,8 @@ with st.sidebar:
             value=float(BREADTH_THRESHOLD), step=0.05,
             help="% stocks above 50d SMA required for sector to qualify"
         )
-    else:
+
+    elif scanner_mode == "📍 52-Week High Proximity":
         st.caption("Find stocks trading near their 52-week high")
         proximity_pct = st.slider(
             "Max % below 52W high",
@@ -87,13 +86,28 @@ with st.sidebar:
             get_universe(force_refresh=True)
             st.rerun()
 
-    st.divider()
-    run_btn = st.button("🔍 Run Screener", type="primary", use_container_width=True)
-    st.caption("Data cached 30 min. Click to refresh.")
+    else:  # Market Breadth
+        st.caption("Live S&P 500 breadth · 15-min cache")
+        if st.button("🔄 Refresh Breadth Data", use_container_width=True):
+            _fetch_sp500_close.clear()
+            _fetch_spy_1y.clear()
+            _fetch_vix.clear()
+            st.rerun()
+        if st.session_state.get("breadth_fetched_at"):
+            st.caption(f"Last computed: {st.session_state['breadth_fetched_at']}")
 
-# ── Header ────────────────────────────────────────────────────────────────────
-st.title("🔥 Hot Theme Stock Screener")
-st.caption("Sector RS ranking | Minervini Trend Template | VCP + ATR signal stack | 52-Week High Proximity")
+    st.divider()
+
+    # Run button only for scanner modes (breadth auto-renders on select)
+    if scanner_mode != "📊 Market Breadth":
+        run_btn = st.button("🔍 Run Screener", type="primary", use_container_width=True)
+        st.caption("Data cached 30 min. Click to refresh.")
+    else:
+        run_btn = False
+
+
+# ── App header ────────────────────────────────────────────────────────────────
+render_app_header()
 
 # ── Session State ─────────────────────────────────────────────────────────────
 if "results" not in st.session_state:
@@ -255,144 +269,144 @@ if run_btn:
     st.rerun()
 
 
-# ── Display ───────────────────────────────────────────────────────────────────
-
+# ── Main tabs ─────────────────────────────────────────────────────────────────
 tab_screener, tab_news = st.tabs(["📊 Stock Screener", "📡 News Scanner"])
 
 with tab_screener:
-    mode_run = st.session_state.scanner_mode_run
 
-    # Stats row (shown for both modes)
-    if st.session_state.stats:
-        s = st.session_state.stats
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Candidates Scanned", s.get("total_scanned", 0))
-        c2.metric("Signals Found", s.get("signals_found", 0))
-        c3.metric("Time Elapsed", f"{s.get('elapsed', 0)}s")
-        c4.metric("Last Updated", st.session_state.last_run or "—")
-
-    if mode_run == "🔥 Hot Theme Signals":
-        # Sector Leaderboard
-        st.subheader("🏆 Sector Leaderboard")
-        if st.session_state.sector_table is not None and not st.session_state.sector_table.empty:
-            display_df = sector_table_display(st.session_state.sector_table)
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "#": st.column_config.NumberColumn(width="small"),
-                    "RS Score": st.column_config.NumberColumn(format="%.3f"),
-                    "Status": st.column_config.TextColumn(width="medium"),
-                },
-            )
-            st.caption("🔥 HOT = top-N ranked; RS Score = 0.6×(3mo RS) + 0.4×(6mo RS) vs SPY")
-        else:
-            st.info("Sector data will appear after running the screener.")
-
-        # Signal results
-        st.subheader("🎯 Signal Results")
-        if st.session_state.results is not None:
-            results = st.session_state.results
-            if not results:
-                st.warning("No stocks passed all filters. Try relaxing thresholds or increasing Sectors to Scan.")
-            else:
-                results_df = signal_results_to_df(results)
-                st.dataframe(
-                    results_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "": st.column_config.TextColumn("", width="small"),
-                        "Mkt Cap ($B)": st.column_config.NumberColumn(
-                            "Mkt Cap ($B)",
-                            help="Market cap in billions",
-                            format="$%.2fB",
-                            width="medium",
-                        ),
-                        "Price": st.column_config.NumberColumn(format="$%.2f"),
-                        "RS vs SPY": st.column_config.NumberColumn(format="%.3f"),
-                        "ATR Stop": st.column_config.NumberColumn(format="$%.2f"),
-                        "Target": st.column_config.NumberColumn(format="$%.2f"),
-                        "R:R": st.column_config.NumberColumn(format="%.1f"),
-                        "Score": st.column_config.ProgressColumn(
-                            "Score", min_value=0, max_value=5, format="%d"
-                        ),
-                    },
-                )
-                st.caption("🟢 Strong signal (VCP + TT 4/4)  |  🟡 Moderate  |  ⬜ Base pass")
-
-                csv_data = results_df.drop(columns=[""]).to_csv(index=False)
-                st.download_button(
-                    label="⬇️ Download CSV",
-                    data=csv_data,
-                    file_name=f"hot_theme_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                    mime="text/csv",
-                )
-
-                with st.expander("🔬 Filter Breakdown"):
-                    breakdown_rows = []
-                    for r in results:
-                        row = {"Symbol": r.symbol, "Sector": r.sector}
-                        row.update({k: ("✅" if v else "❌") for k, v in r.filters.items()})
-                        breakdown_rows.append(row)
-                    st.dataframe(pd.DataFrame(breakdown_rows), use_container_width=True, hide_index=True)
-        else:
-            st.info("Click **Run Screener** in the sidebar to begin scanning.")
-
-    elif mode_run == "📍 52-Week High Proximity":
-        st.subheader("📍 52-Week High Proximity Results")
-        st.caption("Stocks sorted by closeness to their 52-week high — no other filters applied")
-
-        if st.session_state.results is not None:
-            results = st.session_state.results
-            if not results:
-                st.warning("No stocks found within that threshold. Try increasing the % below 52W high.")
-            else:
-                results_df = proximity_results_to_df(results)
-                st.dataframe(
-                    results_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "": st.column_config.TextColumn("", width="small"),
-                        "Mkt Cap ($B)": st.column_config.NumberColumn(
-                            "Mkt Cap ($B)",
-                            format="$%.2fB",
-                            width="medium",
-                        ),
-                        "Price": st.column_config.NumberColumn(format="$%.2f"),
-                        "52W High": st.column_config.NumberColumn(format="$%.2f"),
-                        "% From High": st.column_config.NumberColumn(
-                            "% From High",
-                            help="0% = at the 52-week high",
-                            format="%.2f%%",
-                            width="small",
-                        ),
-                    },
-                )
-                st.caption("🟢 Within 1% of high  |  🟡 Within 3%  |  ⬜ Within threshold")
-
-                csv_data = results_df.drop(columns=[""]).to_csv(index=False)
-                st.download_button(
-                    label="⬇️ Download CSV",
-                    data=csv_data,
-                    file_name=f"52w_proximity_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                    mime="text/csv",
-                )
-        else:
-            st.info("Click **Run Screener** in the sidebar to begin scanning.")
+    # ── Breadth mode — auto-renders, no Run button needed ─────────────────────
+    if scanner_mode == "📊 Market Breadth":
+        render_breadth_dashboard()
 
     else:
-        st.info("Select a scanner mode in the sidebar and click **Run Screener** to begin.")
+        mode_run = st.session_state.scanner_mode_run
+
+        # Stats row (shown for both scanner modes after a run)
+        if st.session_state.stats:
+            s = st.session_state.stats
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Candidates Scanned", s.get("total_scanned", 0))
+            c2.metric("Signals Found", s.get("signals_found", 0))
+            c3.metric("Time Elapsed", f"{s.get('elapsed', 0)}s")
+            c4.metric("Last Updated", st.session_state.last_run or "—")
+
+        if mode_run == "🔥 Hot Theme Signals":
+            # Sector Leaderboard
+            st.subheader("🏆 Sector Leaderboard")
+            if st.session_state.sector_table is not None and not st.session_state.sector_table.empty:
+                display_df = sector_table_display(st.session_state.sector_table)
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "#": st.column_config.NumberColumn(width="small"),
+                        "RS Score": st.column_config.NumberColumn(format="%.3f"),
+                        "Status": st.column_config.TextColumn(width="medium"),
+                    },
+                )
+                st.caption("🔥 HOT = top-N ranked; RS Score = 0.6×(3mo RS) + 0.4×(6mo RS) vs SPY")
+            else:
+                st.info("Sector data will appear after running the screener.")
+
+            # Signal results
+            st.subheader("🎯 Signal Results")
+            if st.session_state.results is not None:
+                results = st.session_state.results
+                if not results:
+                    st.warning("No stocks passed all filters. Try relaxing thresholds or increasing Sectors to Scan.")
+                else:
+                    results_df = signal_results_to_df(results)
+                    st.dataframe(
+                        results_df,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "": st.column_config.TextColumn("", width="small"),
+                            "Mkt Cap ($B)": st.column_config.NumberColumn(
+                                "Mkt Cap ($B)",
+                                help="Market cap in billions",
+                                format="$%.2fB",
+                                width="medium",
+                            ),
+                            "Price": st.column_config.NumberColumn(format="$%.2f"),
+                            "RS vs SPY": st.column_config.NumberColumn(format="%.3f"),
+                            "ATR Stop": st.column_config.NumberColumn(format="$%.2f"),
+                            "Target": st.column_config.NumberColumn(format="$%.2f"),
+                            "R:R": st.column_config.NumberColumn(format="%.1f"),
+                            "Score": st.column_config.ProgressColumn(
+                                "Score", min_value=0, max_value=5, format="%d"
+                            ),
+                        },
+                    )
+                    st.caption("🟢 Strong signal (VCP + TT 4/4)  |  🟡 Moderate  |  ⬜ Base pass")
+
+                    csv_data = results_df.drop(columns=[""]).to_csv(index=False)
+                    st.download_button(
+                        label="⬇️ Download CSV",
+                        data=csv_data,
+                        file_name=f"hot_theme_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                        mime="text/csv",
+                    )
+
+                    with st.expander("🔬 Filter Breakdown"):
+                        breakdown_rows = []
+                        for r in results:
+                            row = {"Symbol": r.symbol, "Sector": r.sector}
+                            row.update({k: ("✅" if v else "❌") for k, v in r.filters.items()})
+                            breakdown_rows.append(row)
+                        st.dataframe(pd.DataFrame(breakdown_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("Click **Run Screener** in the sidebar to begin scanning.")
+
+        elif mode_run == "📍 52-Week High Proximity":
+            st.subheader("📍 52-Week High Proximity Results")
+            st.caption("Stocks sorted by closeness to their 52-week high — no other filters applied")
+
+            if st.session_state.results is not None:
+                results = st.session_state.results
+                if not results:
+                    st.warning("No stocks found within that threshold. Try increasing the % below 52W high.")
+                else:
+                    results_df = proximity_results_to_df(results)
+                    st.dataframe(
+                        results_df,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "": st.column_config.TextColumn("", width="small"),
+                            "Mkt Cap ($B)": st.column_config.NumberColumn(
+                                "Mkt Cap ($B)",
+                                format="$%.2fB",
+                                width="medium",
+                            ),
+                            "Price": st.column_config.NumberColumn(format="$%.2f"),
+                            "52W High": st.column_config.NumberColumn(format="$%.2f"),
+                            "% From High": st.column_config.NumberColumn(
+                                "% From High",
+                                help="0% = at the 52-week high",
+                                format="%.2f%%",
+                                width="small",
+                            ),
+                        },
+                    )
+                    st.caption("🟢 Within 1% of high  |  🟡 Within 3%  |  ⬜ Within threshold")
+
+                    csv_data = results_df.drop(columns=[""]).to_csv(index=False)
+                    st.download_button(
+                        label="⬇️ Download CSV",
+                        data=csv_data,
+                        file_name=f"52w_proximity_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                        mime="text/csv",
+                    )
+            else:
+                st.info("Click **Run Screener** in the sidebar to begin scanning.")
+
+        else:
+            st.info("Select a scanner mode in the sidebar and click **Run Screener** to begin.")
 
 with tab_news:
     render_news_scanner()
 
 # ── Footer ────────────────────────────────────────────────────────────────────
-st.divider()
-st.caption(
-    "📋 Paper mode — thresholds relaxed vs live bot  |  "
-    "Data via yfinance / Alpaca  |  Not financial advice  |  "
-    "Hot Theme filters: Sector RS · Breadth · Stock RS · RSI · MACD · Price/MA/ROC · VPA · VCP · Trend Template · ATR R:R"
-)
+render_footer(st.session_state.last_run)
