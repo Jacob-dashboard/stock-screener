@@ -17,9 +17,10 @@ from alpaca.data.historical.news import NewsClient
 from alpaca.data.requests import NewsRequest
 
 # ── Credentials ───────────────────────────────────────────────────────────────
-# Prefer env vars; fall back to hardcoded keys from the swing bot .env
-_API_KEY = os.getenv("ALPACA_API_KEY", "PKJQFB3HKNCN2MJGLMV2VEF7VF")
-_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "ACVtfemQZTiA865YGuTEWLBQjhNaSyLQqdGnHgqVNLuj")
+# Read exclusively from environment — set ALPACA_API_KEY and ALPACA_SECRET_KEY
+# in .env.local (sourced by run.sh) or in your shell environment.
+_API_KEY = os.getenv("ALPACA_API_KEY")
+_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 
 # ── High-impact keyword categories ───────────────────────────────────────────
 IMPACT_KEYWORDS: dict[str, list[str]] = {
@@ -104,6 +105,12 @@ def _impact_badge(score: int) -> str:
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_news(hours_back: int = 4, limit: int = 50, symbols: Optional[list[str]] = None) -> pd.DataFrame:
     """Fetch and score recent news from Alpaca."""
+    if not _API_KEY or not _SECRET_KEY:
+        import logging
+        logging.getLogger(__name__).warning(
+            "ALPACA_API_KEY or ALPACA_SECRET_KEY not set — news scan skipped"
+        )
+        return pd.DataFrame()
     client = NewsClient(api_key=_API_KEY, secret_key=_SECRET_KEY)
 
     kwargs: dict = {

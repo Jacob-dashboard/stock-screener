@@ -45,6 +45,8 @@ class SignalResult:
     target: float
     rr: float
     market_cap: Optional[float] = None
+    # 52-week high proximity (0.0 = AT the high, 0.15 = 15% below)
+    pct_from_52w_high: Optional[float] = None
     # Composite score: higher = stronger signal
     score: int = 0
     # Filter breakdown
@@ -158,6 +160,10 @@ def scan_ticker(
     if not filters["atr_rr"]:
         return None
 
+    # ── 52-week high proximity ────────────────────────────────────────────────
+    high_52w = float(close.tail(252).max())
+    pct_from_high = round((high_52w - price) / high_52w, 4) if high_52w > 0 else None
+
     result = SignalResult(
         symbol=symbol,
         sector=sector,
@@ -170,6 +176,7 @@ def scan_ticker(
         atr_stop=stop,
         target=target,
         rr=rr,
+        pct_from_52w_high=pct_from_high,
         filters=filters,
     )
     result.score = _score_signal(result)

@@ -1,6 +1,14 @@
 #!/bin/bash
 cd "$(dirname "$0")"
 
+# Load local env vars (not committed — contains API keys)
+if [ -f ".env.local" ]; then
+    set -a
+    # shellcheck source=/dev/null
+    source .env.local
+    set +a
+fi
+
 # Use local venv if available
 if [ -f ".venv/bin/streamlit" ]; then
     STREAMLIT=".venv/bin/streamlit"

@@ -61,6 +61,14 @@ with st.sidebar:
         help="% stocks above 50d SMA required for sector to qualify"
     )
     st.divider()
+    st.subheader("52-Week High Filter")
+    near_52w_filter = st.checkbox("Only stocks near 52W high", value=False)
+    near_52w_threshold = st.slider(
+        "Max % below 52W high", min_value=0, max_value=40, value=5,
+        help="0% = at the high, 5% = within 5% of high",
+        disabled=not near_52w_filter,
+    )
+    st.divider()
     run_btn = st.button("🔍 Run Screener", type="primary", use_container_width=True)
     st.caption("Data cached 30 min. Click to refresh.")
 
@@ -103,12 +111,14 @@ def _fmt_mcap(val) -> str:
 def results_to_df(results: list[SignalResult]) -> pd.DataFrame:
     rows = []
     for r in results:
+        pct_high = r.pct_from_52w_high
         rows.append({
             "": _row_color(r),
             "Symbol": r.symbol,
             "Sector": r.sector,
             "Mkt Cap ($B)": (r.market_cap / 1e9) if r.market_cap is not None else float("nan"),
             "Price": r.price,
+            "% From 52W High": round(pct_high * 100, 1) if pct_high is not None else float("nan"),
             "RSI": r.rsi,
             "RS vs SPY": r.rs,
             "TT Score": f"{r.tt_score}/4",
@@ -221,6 +231,14 @@ with tab_screener:
     if st.session_state.results is not None:
         results = st.session_state.results
 
+        # Apply 52W high filter if enabled
+        if near_52w_filter and results:
+            threshold = near_52w_threshold / 100.0
+            results = [
+                r for r in results
+                if r.pct_from_52w_high is not None and r.pct_from_52w_high <= threshold
+            ]
+
         if not results:
             st.warning("No stocks passed all 10 filters. Try relaxing thresholds or increasing N_HOT_SECTORS.")
         else:
@@ -239,6 +257,12 @@ with tab_screener:
                         width="medium",
                     ),
                     "Price": st.column_config.NumberColumn(format="$%.2f"),
+                    "% From 52W High": st.column_config.NumberColumn(
+                        "% From 52W High",
+                        help="0% = at the 52-week high, 15% = 15% below it",
+                        format="%.1f%%",
+                        width="medium",
+                    ),
                     "RS vs SPY": st.column_config.NumberColumn(format="%.3f"),
                     "ATR Stop": st.column_config.NumberColumn(format="$%.2f"),
                     "Target": st.column_config.NumberColumn(format="$%.2f"),
