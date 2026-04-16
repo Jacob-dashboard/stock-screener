@@ -25,6 +25,8 @@ import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 
+from screener.breadth_stockbee import fetch_stockbee_breadth, latest_stockbee_row
+
 logger = logging.getLogger(__name__)
 
 
@@ -276,10 +278,20 @@ def get_breadth_data() -> dict:
     spy_df   = _fetch_spy_1y()
     vix_df   = _fetch_vix()
     mccl_val, mccl_ser = _mcclellan(close_df)
+
+    # Stockbee Market Monitor — authoritative daily breadth, 1-hour TTL
+    sb_df  = fetch_stockbee_breadth()
+    sb_row = latest_stockbee_row(sb_df)
+
+    # Use Stockbee T2108 when available; fall back to yfinance computation
+    t2108_yf = _pct_above_ma(close_df, 40)
+    t2108 = sb_row.get("t2108") if sb_row.get("t2108") is not None else t2108_yf
+
     return {
         "fetched_at":    datetime.now(),
         "sp500_count":   len(close_df.columns) if not close_df.empty else 0,
-        "t2108":         _pct_above_ma(close_df, 40),
+        "t2108":         t2108,
+        "t2108_source":  "Stockbee" if sb_row.get("t2108") is not None else "yfinance",
         "pct_above_50":  _pct_above_ma(close_df, 50),
         "pct_above_200": _pct_above_ma(close_df, 200),
         "ad_line":       _ad_line(close_df, 60),
@@ -288,6 +300,8 @@ def get_breadth_data() -> dict:
         "new_hl":        _new_highs_lows(close_df),
         "spy_regime":    _spy_regime(spy_df),
         "vix":           _vix_stats(vix_df),
+        "stockbee":      sb_row,
+        "stockbee_df":   sb_df,
     }
 
 
@@ -342,6 +356,7 @@ def render_breadth_dashboard() -> None:
     c1, c2, c3, c4 = st.columns(4)
 
     t2108 = data["t2108"]
+    t2108_src = data.get("t2108_source", "yfinance")
     col = _t2108_css(t2108)
     with c1:
         st.markdown(
@@ -349,7 +364,7 @@ def render_breadth_dashboard() -> None:
                 "T2108 — % above 40-Day MA",
                 f'<div style="font-family:JetBrains Mono,monospace;font-size:2em;'
                 f'font-weight:700;color:{col}">{_safe(t2108)}%</div>',
-                _t2108_label(t2108),
+                f"{_t2108_label(t2108)} · via {t2108_src}",
             ),
             unsafe_allow_html=True,
         )
@@ -479,6 +494,83 @@ def render_breadth_dashboard() -> None:
         else:
             st.caption("Need 252+ days of history")
 
+    # ── Stockbee Market Monitor row ─────────────────────────────────────────
+    sb = data.get("stockbee", {})
+    if sb:
+        st.markdown("---")
+        st.markdown(
+            '<div style="font-size:0.72em;color:#8b949e;text-transform:uppercase;'
+            'letter-spacing:0.07em;margin-bottom:10px">'
+            'Stockbee Market Monitor — Daily Momentum Counts</div>',
+            unsafe_allow_html=True,
+        )
+        sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+
+        def _sb_card(title: str, up_val, dn_val, up_label="Up", dn_label="Down") -> str:
+            up_s = _safe(up_val, ".0f")
+            dn_s = _safe(dn_val, ".0f")
+            return (
+                f'<div style="background:#161B22;border:1px solid #30363d;border-radius:8px;'
+                f'padding:12px 14px">'
+                f'<div style="font-size:0.68em;color:#8b949e;text-transform:uppercase;'
+                f'letter-spacing:0.06em;margin-bottom:6px">{title}</div>'
+                f'<div style="display:flex;gap:16px">'
+                f'<div><span style="font-size:1.3em;font-weight:700;color:#3fb950;'
+                f'font-family:JetBrains Mono,monospace">{up_s}</span>'
+                f'<div style="font-size:0.65em;color:#8b949e">{up_label}</div></div>'
+                f'<div><span style="font-size:1.3em;font-weight:700;color:#f85149;'
+                f'font-family:JetBrains Mono,monospace">{dn_s}</span>'
+                f'<div style="font-size:0.65em;color:#8b949e">{dn_label}</div></div>'
+                f'</div></div>'
+            )
+
+        with sc1:
+            st.markdown(
+                _sb_card("4% Breakouts Today",
+                         sb.get("up_4pct"), sb.get("dn_4pct")),
+                unsafe_allow_html=True,
+            )
+        with sc2:
+            r5 = sb.get("ratio_5d")
+            r5_col = "#3fb950" if (r5 and r5 >= 2) else ("#f0883e" if (r5 and r5 >= 1) else "#f85149")
+            st.markdown(
+                f'<div style="background:#161B22;border:1px solid #30363d;border-radius:8px;'
+                f'padding:12px 14px">'
+                f'<div style="font-size:0.68em;color:#8b949e;text-transform:uppercase;'
+                f'letter-spacing:0.06em;margin-bottom:6px">5-Day Up/Down Ratio</div>'
+                f'<div style="font-size:1.6em;font-weight:700;color:{r5_col};'
+                f'font-family:JetBrains Mono,monospace">{_safe(r5, ".2f")}</div>'
+                f'<div style="font-size:0.65em;color:#8b949e">≥2 = bullish thrust</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        with sc3:
+            r10 = sb.get("ratio_10d")
+            r10_col = "#3fb950" if (r10 and r10 >= 2) else ("#f0883e" if (r10 and r10 >= 1) else "#f85149")
+            st.markdown(
+                f'<div style="background:#161B22;border:1px solid #30363d;border-radius:8px;'
+                f'padding:12px 14px">'
+                f'<div style="font-size:0.68em;color:#8b949e;text-transform:uppercase;'
+                f'letter-spacing:0.06em;margin-bottom:6px">10-Day Up/Down Ratio</div>'
+                f'<div style="font-size:1.6em;font-weight:700;color:{r10_col};'
+                f'font-family:JetBrains Mono,monospace">{_safe(r10, ".2f")}</div>'
+                f'<div style="font-size:0.65em;color:#8b949e">≥2 = sustained thrust</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        with sc4:
+            st.markdown(
+                _sb_card("Up 25%+ in a Month",
+                         sb.get("up_25pct_mo"), sb.get("dn_25pct_mo")),
+                unsafe_allow_html=True,
+            )
+        with sc5:
+            st.markdown(
+                _sb_card("Up 50%+ in a Month",
+                         sb.get("up_50pct_mo"), sb.get("dn_50pct_mo")),
+                unsafe_allow_html=True,
+            )
+
     # ── Charts ──────────────────────────────────────────────────────────────
     st.markdown("---")
     tab_ad, tab_mccl = st.tabs(["📈 Advance / Decline Line", "〰️ McClellan Oscillator"])
@@ -540,3 +632,14 @@ def render_breadth_dashboard() -> None:
             st.info(
                 "McClellan data unavailable — need 50+ trading days of history."
             )
+
+    # ── Footer ───────────────────────────────────────────────────────────────
+    st.markdown(
+        '<div style="margin-top:24px;font-size:0.7em;color:#6e7681">'
+        'T2108 &amp; momentum counts via '
+        '<a href="https://stockbee.blogspot.com/p/mm.html" target="_blank" '
+        'style="color:#58a6ff">Stockbee Market Monitor</a> · '
+        'A/D Line, McClellan, New Highs/Lows, SPY Regime &amp; VIX computed from yfinance.'
+        '</div>',
+        unsafe_allow_html=True,
+    )

@@ -22,6 +22,7 @@ from screener.breadth import (
     _fetch_spy_1y,
     _fetch_vix,
 )
+from screener.breadth_stockbee import fetch_stockbee_breadth
 from screener.ui.theme import inject_theme, render_app_header, render_sidebar_brand, render_footer
 
 logging.basicConfig(level=logging.WARNING)
@@ -92,6 +93,7 @@ with st.sidebar:
             _fetch_sp500_close.clear()
             _fetch_spy_1y.clear()
             _fetch_vix.clear()
+            fetch_stockbee_breadth.clear()
             st.rerun()
         if st.session_state.get("breadth_fetched_at"):
             st.caption(f"Last computed: {st.session_state['breadth_fetched_at']}")
