@@ -497,13 +497,8 @@ def render_breadth_dashboard() -> None:
                 fillcolor="rgba(121,192,255,0.12)",
             ))
             fig.add_hline(y=0, line_color="#30363d", line_width=1)
-            fig.update_layout(
-                **_PLOT_LAYOUT,
-                yaxis=dict(
-                    gridcolor="#21262d", showgrid=True,
-                    title=dict(text="Cumulative A−D", font=dict(size=11)),
-                ),
-            )
+            fig.update_layout(**_PLOT_LAYOUT)
+            fig.update_yaxes(title=dict(text="Cumulative A−D", font=dict(size=11)))
             st.plotly_chart(fig, use_container_width=True)
             st.caption(
                 "Cumulative advance minus decline · S&P 500 · last 60 trading days"
@@ -535,14 +530,8 @@ def render_breadth_dashboard() -> None:
                 annotation_font=dict(color="#f85149", size=10),
             )
             fig.add_hline(y=0, line_color="#30363d", line_width=1)
-            fig.update_layout(
-                **_PLOT_LAYOUT,
-                margin=dict(l=50, r=120, t=20, b=40),
-                yaxis=dict(
-                    gridcolor="#21262d", showgrid=True,
-                    title=dict(text="Oscillator", font=dict(size=11)),
-                ),
-            )
+            fig.update_layout(**{**_PLOT_LAYOUT, "margin": dict(l=50, r=120, t=20, b=40)})
+            fig.update_yaxes(title=dict(text="Oscillator", font=dict(size=11)))
             st.plotly_chart(fig, use_container_width=True)
             st.caption(
                 "19d EMA − 39d EMA of daily (advances − declines) · last 30 sessions · S&P 500"
