@@ -2,6 +2,7 @@
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
@@ -86,14 +87,22 @@ def check_spy_regime(spy_data: pd.DataFrame) -> tuple[bool, float, float]:
 
 
 def _fetch_market_caps(symbols: tuple[str, ...]) -> dict[str, Optional[float]]:
-    """Fetch market caps using yfinance fast_info for speed."""
-    caps: dict[str, Optional[float]] = {}
-    for sym in symbols:
+    """Fetch market caps in parallel using ThreadPoolExecutor (≈20 concurrent)."""
+    if not symbols:
+        return {}
+
+    def _one(sym: str) -> tuple[str, Optional[float]]:
         try:
             fi = yf.Ticker(sym).fast_info
-            caps[sym] = getattr(fi, "market_cap", None)
+            return sym, getattr(fi, "market_cap", None)
         except Exception:
-            caps[sym] = None
+            return sym, None
+
+    caps: dict[str, Optional[float]] = {}
+    workers = min(20, len(symbols))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for sym, cap in ex.map(_one, symbols):
+            caps[sym] = cap
     return caps
 
 
@@ -382,6 +391,195 @@ def run_proximity_scanner(
     if results:
         if progress_callback:
             progress_callback(0.97, f"Fetching market caps for {len(results)} matches…")
+        mcaps = _fetch_market_caps(tuple(r.symbol for r in results))
+        for r in results:
+            r.market_cap = mcaps.get(r.symbol)
+
+    return results, total
+
+
+# ── Full-Universe Hot Theme Signals Scanner ────────────────────────────────────
+
+_FULL_SCAN_BATCH = 500   # tickers per yfinance batch
+
+
+def run_full_universe_screener(
+    spy_data: pd.DataFrame,
+    progress_callback=None,
+) -> tuple[list[SignalResult], int]:
+    """
+    Scan the full US equity universe (~5,000 tickers) with the 10-filter signal stack.
+
+    Two-pass approach for efficiency:
+      Pass 1 — daily data in batches of 500; apply hard gates (RS, RSI, Trend Template, ATR).
+               Penny stocks (<$1) are skipped.
+      Pass 2 — weekly data for survivors only (~50–150 tickers); compute VCP and full scores.
+
+    Sector/ETF labels are assigned for the ~400 curated tickers; all others are labelled
+    "Other" so they still appear in results.
+
+    Args:
+        spy_data:          SPY daily DataFrame (used for RS computation).
+        progress_callback: Optional (pct: float, msg: str) -> None.
+
+    Returns:
+        (list[SignalResult] sorted by score desc, total tickers scanned)
+    """
+    from screener.universe import get_universe
+
+    if progress_callback:
+        progress_callback(0.02, "Loading ticker universe…")
+
+    all_symbols = get_universe()
+    total = len(all_symbols)
+    if total == 0:
+        logger.warning("Universe empty — check nasdaqtrader.com access")
+        return [], 0
+
+    try:
+        spy_close = get_close(spy_data)
+    except Exception as e:
+        logger.error("Could not extract SPY close: %s", e)
+        return [], total
+
+    sector_lookup = _build_sector_lookup()
+    n_batches = max(1, (total + _FULL_SCAN_BATCH - 1) // _FULL_SCAN_BATCH)
+
+    # ── Pass 1: hard gates on daily data ─────────────────────────────────────
+    # survivors: sym → (etf, sector, df)
+    survivors: dict[str, tuple[str, str, pd.DataFrame]] = {}
+
+    for batch_idx, start in enumerate(range(0, total, _FULL_SCAN_BATCH)):
+        batch = tuple(all_symbols[start : start + _FULL_SCAN_BATCH])
+        end = min(start + len(batch), total)
+        pct = 0.05 + 0.65 * (start / total)
+        if progress_callback:
+            progress_callback(
+                pct,
+                f"Scanning {start + 1}–{end} of {total} (batch {batch_idx + 1}/{n_batches})…",
+            )
+
+        try:
+            batch_data = fetch_daily(batch)
+        except Exception as e:
+            logger.warning("Batch %d failed: %s", batch_idx + 1, e)
+            continue
+
+        for sym in batch:
+            if sym not in batch_data:
+                continue
+            df = batch_data[sym]
+            try:
+                close = get_close(df)
+            except Exception:
+                continue
+            if len(close) < 60:
+                continue
+
+            price = float(close.iloc[-1])
+            if price < 1.0:          # skip penny stocks
+                continue
+
+            # Gate 1: RS vs SPY
+            rs = compute_rs_vs_spy(close, spy_close)
+            if np.isnan(rs) or rs <= RS_STOCK_MIN:
+                continue
+
+            # Gate 2: RSI
+            rsi_ok, _ = check_rsi(close)
+            if not rsi_ok:
+                continue
+
+            # Gate 3: Trend Template ≥ 2/4
+            tt_ok, _ = compute_trend_template(close)
+            if not tt_ok:
+                continue
+
+            # Gate 4: ATR R:R
+            atr_ok, _, _, _, _ = check_atr_rr(df)
+            if not atr_ok:
+                continue
+
+            etf, sector = sector_lookup.get(sym, ("—", "Other"))
+            survivors[sym] = (etf, sector, df)
+
+    if not survivors:
+        return [], total
+
+    # ── Pass 2: weekly data for survivors → VCP + composite score ────────────
+    survivor_syms = tuple(sorted(survivors.keys()))
+    if progress_callback:
+        progress_callback(
+            0.72,
+            f"Fetching weekly data for {len(survivor_syms)} candidates…",
+        )
+
+    weekly_data = fetch_weekly(survivor_syms)
+
+    if progress_callback:
+        progress_callback(0.82, "Computing composite scores…")
+
+    results: list[SignalResult] = []
+
+    for sym, (etf, sector, df) in survivors.items():
+        try:
+            close = get_close(df)
+            price = float(close.iloc[-1])
+
+            filters: dict[str, bool] = {}
+
+            rs = compute_rs_vs_spy(close, spy_close)
+            filters["rs"] = True          # passed gate in pass 1
+
+            rsi_ok, rsi_val = check_rsi(close)
+            filters["rsi"] = True         # passed gate in pass 1
+
+            filters["macd"] = check_macd(close)
+
+            ma50 = sma(close, 50)
+            price_above_ma = (
+                not ma50.dropna().empty
+                and price > float(ma50.dropna().iloc[-1])
+            )
+            filters["price_ma_roc"] = price_above_ma
+
+            vpa_ok, vol_ratio = check_vpa(df)
+            filters["vpa"] = vpa_ok
+
+            weekly_df = weekly_data.get(sym)
+            filters["vcp"] = check_vcp(close, weekly_df)
+
+            tt_ok, tt_score = compute_trend_template(close)
+            filters["trend_template"] = True  # passed gate in pass 1
+
+            atr_ok, _, stop, target, rr = check_atr_rr(df)
+            filters["atr_rr"] = True          # passed gate in pass 1
+
+            result = SignalResult(
+                symbol=sym,
+                sector=sector,
+                etf=etf,
+                price=round(price, 2),
+                rsi=round(rsi_val, 1),
+                rs=round(rs, 3),
+                tt_score=tt_score,
+                vol_ratio=vol_ratio,
+                atr_stop=stop,
+                target=target,
+                rr=rr,
+                filters=filters,
+            )
+            result.score = _score_signal(result)
+            results.append(result)
+        except Exception as e:
+            logger.debug("Error scoring %s: %s", sym, e)
+
+    results.sort(key=lambda r: (-r.score, -r.rs))
+
+    # Parallel market cap fetch for passing tickers
+    if results:
+        if progress_callback:
+            progress_callback(0.93, f"Fetching market caps for {len(results)} signals…")
         mcaps = _fetch_market_caps(tuple(r.symbol for r in results))
         for r in results:
             r.market_cap = mcaps.get(r.symbol)
