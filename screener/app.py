@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 
 from screener.config import N_HOT_SECTORS, RS_STOCK_MIN, RSI_MIN, RSI_MAX, BREADTH_THRESHOLD
-from screener.data import fetch_spy, get_close
+from screener.data import fetch_spy
 from screener.sector_engine import build_sector_table
 from screener.signal_engine import (
     run_screener,
@@ -21,7 +21,7 @@ from screener.signal_engine import (
     SignalResult,
     ProximityResult,
 )
-from screener.theme_engine import scan_all_themes, ThemeScore, StockScore
+from screener.theme_tracker import render_theme_tracker, SORT_COLUMNS as TRACKER_SORT_COLUMNS
 from screener.news_scanner import render_news_scanner
 from screener.universe import get_universe, universe_cache_info
 from screener.breadth import (
@@ -56,14 +56,15 @@ with st.sidebar:
             "🔥 Hot Theme Signals",
             "📍 52-Week High Proximity",
             "📊 Market Breadth",
-            "🎯 Theme Scanner",
+            "🎯 Theme Rotation Tracker",
         ],
         help=(
             "**Hot Theme**: full 10-filter signal stack on the entire US equity universe "
             "(~5,000 tickers — RS, RSI, Trend Template, VCP, ATR R:R)\n\n"
             "**52-Week High Proximity**: standalone scan — every stock within X% of its yearly high\n\n"
             "**Market Breadth**: live S&P 500 breadth dashboard — T2108, A/D Line, McClellan, VIX\n\n"
-            "**Theme Scanner**: 18 pre-defined sector baskets scored by momentum"
+            "**Theme Rotation Tracker**: 39 sector/theme ETFs across 1D/1W/1M/3M/YTD with "
+            "rotation signals (where money is flowing IN vs OUT) and a leadership quadrant chart"
         ),
     )
     st.divider()
@@ -113,14 +114,23 @@ with st.sidebar:
         if st.session_state.get("breadth_fetched_at"):
             st.caption(f"Last computed: {st.session_state['breadth_fetched_at']}")
 
-    else:  # 🎯 Theme Scanner
-        st.caption("18 pre-defined sector baskets")
-        st.caption("Scored by momentum · 30-min data cache")
+    else:  # 🎯 Theme Rotation Tracker
+        st.caption("39 theme/sector ETFs · 15-min cache")
+        tracker_sort_by = st.selectbox(
+            "Sort by",
+            TRACKER_SORT_COLUMNS,
+            index=1,  # default: 1 Week
+            help="Pick the timeframe to rank themes by (matches Pine Script's sortBy)."
+        )
+        if st.button("🔄 Refresh Theme Data", use_container_width=True):
+            from screener.theme_tracker import fetch_theme_etfs
+            fetch_theme_etfs.clear()
+            st.rerun()
 
     st.divider()
 
-    # Run button — not needed for Market Breadth (auto-renders)
-    if scanner_mode != "📊 Market Breadth":
+    # Run button — not needed for Market Breadth or Theme Tracker (both auto-render)
+    if scanner_mode in ("🔥 Hot Theme Signals", "📍 52-Week High Proximity"):
         run_btn = st.button("🔍 Run Screener", type="primary", use_container_width=True)
         st.caption("Data cached 30 min. Click to refresh.")
     else:
@@ -133,8 +143,6 @@ render_app_header()
 # ── Session State ─────────────────────────────────────────────────────────────
 if "results" not in st.session_state:
     st.session_state.results = None
-if "theme_results" not in st.session_state:
-    st.session_state.theme_results = None
 if "sector_table" not in st.session_state:
     st.session_state.sector_table = None
 if "last_run" not in st.session_state:
@@ -227,40 +235,6 @@ def sector_table_display(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def theme_score_row(ts: ThemeScore) -> dict:
-    emoji = "🟢" if ts.momentum_score >= 70 else ("🟡" if ts.momentum_score >= 40 else "🔴")
-    return {
-        "": emoji,
-        "Theme": ts.name,
-        "Momentum": ts.momentum_score,
-        "Avg RS": ts.avg_rs,
-        "Avg % from High": ts.avg_pct_from_high,
-        "Vol Surges": ts.vol_surge_count,
-        "Best 1W": f"{ts.best_1w} ({ts.best_1w_ret:+.1f}%)" if ts.best_1w != "—" else "—",
-        "Best 1M": f"{ts.best_1m} ({ts.best_1m_ret:+.1f}%)" if ts.best_1m != "—" else "—",
-        "Best 3M": f"{ts.best_3m} ({ts.best_3m_ret:+.1f}%)" if ts.best_3m != "—" else "—",
-        "Stocks": ts.stock_count,
-    }
-
-
-def stocks_to_df(stocks: list[StockScore]) -> pd.DataFrame:
-    rows = []
-    for s in stocks:
-        rows.append({
-            "Symbol": s.symbol,
-            "Price": s.price,
-            ">20d MA": "✅" if s.above_20d else "❌",
-            ">50d MA": "✅" if s.above_50d else "❌",
-            "RS vs SPY": s.rs_vs_spy,
-            "% from High": s.pct_from_high,
-            "1W %": s.ret_1w,
-            "1M %": s.ret_1m,
-            "3M %": s.ret_3m,
-            "Vol Surge": "🔥" if s.vol_surge else "",
-        })
-    return pd.DataFrame(rows)
-
-
 # ── Run Screener ──────────────────────────────────────────────────────────────
 if run_btn:
     start_time = time.time()
@@ -295,7 +269,6 @@ if run_btn:
                 progress_callback=update_progress,
             )
             st.session_state.results = results
-            st.session_state.theme_results = None
             elapsed = round(time.time() - start_time, 1)
             st.session_state.last_run = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             st.session_state.stats = {
@@ -312,7 +285,6 @@ if run_btn:
                 progress_callback=update_progress,
             )
             st.session_state.results = results
-            st.session_state.theme_results = None
             st.session_state.sector_table = None
             elapsed = round(time.time() - start_time, 1)
             st.session_state.last_run = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -320,36 +292,6 @@ if run_btn:
                 "total_scanned": total_scanned,
                 "signals_found": len(results),
                 "elapsed": elapsed,
-            }
-
-    # ── Theme Scanner ─────────────────────────────────────────────────────────
-    else:
-        with st.spinner("Scanning theme baskets…"):
-            update_progress(0.02, "Fetching SPY data…")
-            spy_data = fetch_spy()
-            if spy_data is None:
-                st.error("Failed to fetch SPY data. Check your internet connection.")
-                st.stop()
-
-            try:
-                spy_close = get_close(spy_data)
-            except Exception:
-                st.error("Could not extract SPY close series.")
-                st.stop()
-
-            themes = scan_all_themes(spy_close, progress_callback=update_progress)
-            st.session_state.theme_results = themes
-            st.session_state.results = None
-            st.session_state.sector_table = None
-            elapsed = round(time.time() - start_time, 1)
-            st.session_state.last_run = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            n_hot_themes = sum(1 for t in themes if t.momentum_score >= 70)
-            st.session_state.stats = {
-                "total_scanned": sum(t.stock_count for t in themes),
-                "signals_found": n_hot_themes,
-                "elapsed": elapsed,
-                "is_theme": True,
-                "theme_count": len(themes),
             }
 
     progress_bar.progress(1.0, text="Done!")
@@ -367,6 +309,10 @@ with tab_screener:
     if scanner_mode == "📊 Market Breadth":
         render_breadth_dashboard()
 
+    # ── Theme Rotation Tracker — also auto-renders ─────────────────────────────
+    elif scanner_mode == "🎯 Theme Rotation Tracker":
+        render_theme_tracker(sort_by=tracker_sort_by)
+
     else:
         mode_run = st.session_state.scanner_mode_run
 
@@ -374,12 +320,8 @@ with tab_screener:
         if st.session_state.stats:
             s = st.session_state.stats
             c1, c2, c3, c4 = st.columns(4)
-            if s.get("is_theme"):
-                c1.metric("Themes Scored", s.get("theme_count", 0))
-                c2.metric("🔥 Hot Themes (≥70)", s.get("signals_found", 0))
-            else:
-                c1.metric("Candidates Scanned", s.get("total_scanned", 0))
-                c2.metric("Signals Found", s.get("signals_found", 0))
+            c1.metric("Candidates Scanned", s.get("total_scanned", 0))
+            c2.metric("Signals Found", s.get("signals_found", 0))
             c3.metric("Time Elapsed", f"{s.get('elapsed', 0)}s")
             c4.metric("Last Updated", st.session_state.last_run or "—")
 
@@ -510,95 +452,6 @@ with tab_screener:
                     )
             else:
                 st.info("Click **Run Screener** in the sidebar to begin scanning.")
-
-        # ── Theme Scanner display ─────────────────────────────────────────────
-        elif mode_run == "🎯 Theme Scanner":
-            st.subheader("🎯 Theme Scanner — Ranked by Momentum Score")
-            st.caption(
-                "Momentum = % of basket stocks above both 20d & 50d MA  ·  "
-                "🟢 ≥70 (hot)  🟡 40–70 (neutral)  🔴 <40 (cold)"
-            )
-
-            themes: list[ThemeScore] | None = st.session_state.theme_results
-            if themes is None:
-                st.info("Click **Run Screener** in the sidebar to score all 18 theme baskets.")
-            elif not themes:
-                st.warning("No theme data available.")
-            else:
-                # ── Summary table ─────────────────────────────────────────────
-                table_rows = [theme_score_row(ts) for ts in themes]
-                table_df = pd.DataFrame(table_rows)
-
-                st.dataframe(
-                    table_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "": st.column_config.TextColumn("", width="small"),
-                        "Theme": st.column_config.TextColumn(width="large"),
-                        "Momentum": st.column_config.ProgressColumn(
-                            "Momentum Score",
-                            help="% of basket stocks above BOTH 20d AND 50d MA",
-                            min_value=0, max_value=100, format="%.1f",
-                        ),
-                        "Avg RS": st.column_config.NumberColumn(
-                            "Avg RS vs SPY", format="%.3f"
-                        ),
-                        "Avg % from High": st.column_config.NumberColumn(
-                            "Avg % from High", format="%.1f%%"
-                        ),
-                        "Vol Surges": st.column_config.NumberColumn(
-                            "Vol Surges", help="# stocks with today's vol ≥ 2× 20d avg"
-                        ),
-                        "Stocks": st.column_config.NumberColumn("Stocks"),
-                    },
-                )
-
-                # ── Per-theme expanders ───────────────────────────────────────
-                st.subheader("Theme Drill-Down")
-                for rank, ts in enumerate(themes, start=1):
-                    emoji = "🟢" if ts.momentum_score >= 70 else ("🟡" if ts.momentum_score >= 40 else "🔴")
-                    label = (
-                        f"{rank}. {emoji} {ts.name}  "
-                        f"· Momentum {ts.momentum_score:.0f}  "
-                        f"· Avg RS {ts.avg_rs:.2f}  "
-                        f"· {ts.vol_surge_count} vol surge{'s' if ts.vol_surge_count != 1 else ''}"
-                    )
-                    with st.expander(label):
-                        if not ts.stocks:
-                            st.caption("No valid data for this basket.")
-                        else:
-                            df = stocks_to_df(ts.stocks)
-                            st.dataframe(
-                                df,
-                                use_container_width=True,
-                                hide_index=True,
-                                column_config={
-                                    "Price": st.column_config.NumberColumn(format="$%.2f"),
-                                    "RS vs SPY": st.column_config.NumberColumn(format="%.3f"),
-                                    "% from High": st.column_config.NumberColumn(format="%.1f%%"),
-                                    "1W %": st.column_config.NumberColumn(format="%+.1f%%"),
-                                    "1M %": st.column_config.NumberColumn(format="%+.1f%%"),
-                                    "3M %": st.column_config.NumberColumn(format="%+.1f%%"),
-                                },
-                            )
-                            # Best performers callout
-                            col1, col2, col3 = st.columns(3)
-                            col1.metric(
-                                "Best 1-Week",
-                                ts.best_1w,
-                                f"{ts.best_1w_ret:+.1f}%",
-                            )
-                            col2.metric(
-                                "Best 1-Month",
-                                ts.best_1m,
-                                f"{ts.best_1m_ret:+.1f}%",
-                            )
-                            col3.metric(
-                                "Best 3-Month",
-                                ts.best_3m,
-                                f"{ts.best_3m_ret:+.1f}%",
-                            )
 
         else:
             st.info("Select a scanner mode in the sidebar and click **Run Screener** to begin.")
