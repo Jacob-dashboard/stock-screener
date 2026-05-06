@@ -1,7 +1,7 @@
 """
 screener/breadth.py — Market Breadth Dashboard
 
-Calculations and Streamlit rendering for the 📊 Market Breadth sidebar mode.
+Calculations and Streamlit rendering for the Market Breadth sidebar mode.
 All heavy data fetches are cached with 15-minute TTL via @st.cache_data(ttl=900).
 
 Indicators:
@@ -215,7 +215,7 @@ def _new_highs_lows(close_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _spy_regime(spy_df: pd.DataFrame) -> dict:
-    """Traffic-light regime: 🟢 both MAs below, 🟡 mixed, 🔴 both MAs above."""
+    """SPY regime: BULL above both MAs, MIXED between, BEAR below both."""
     if spy_df.empty or len(spy_df) < 200:
         return {}
     close = (
@@ -228,15 +228,15 @@ def _spy_regime(spy_df: pd.DataFrame) -> dict:
     ma200 = float(close.rolling(200).mean().iloc[-1])
     above50, above200 = price > ma50, price > ma200
     if above50 and above200:
-        emoji, label = "🟢", "Bull — SPY above both 50d & 200d MA"
+        regime, color, label = "BULL", "#3fb950", "SPY above both 50d & 200d MA"
     elif above50 or above200:
-        emoji, label = "🟡", "Mixed — SPY between 50d and 200d MA"
+        regime, color, label = "MIXED", "#f0883e", "SPY between 50d and 200d MA"
     else:
-        emoji, label = "🔴", "Bear — SPY below both 50d & 200d MA"
+        regime, color, label = "BEAR", "#f85149", "SPY below both 50d & 200d MA"
     return dict(
         price=price, ma50=ma50, ma200=ma200,
         above50=above50, above200=above200,
-        emoji=emoji, label=label,
+        regime=regime, color=color, label=label,
     )
 
 
@@ -337,7 +337,7 @@ def _metric_card(title: str, value_html: str, sub: str = "") -> str:
 def render_breadth_dashboard() -> None:
     """Full Market Breadth dashboard UI. Called from app.py."""
 
-    st.subheader("📊 Market Breadth Dashboard")
+    st.subheader("Market Breadth")
 
     with st.spinner("Loading S&P 500 breadth data — first load may take ~30 s…"):
         data = get_breadth_data()
@@ -404,9 +404,9 @@ def render_breadth_dashboard() -> None:
             st.markdown(
                 _metric_card(
                     "SPY Regime",
-                    f'<div style="font-size:1.9em;line-height:1">{regime["emoji"]}'
-                    f' <span style="font-size:0.55em;color:#c9d1d9;vertical-align:middle">'
-                    f'{regime["label"].split("—")[0].strip()}</span></div>',
+                    f'<div style="font-family:JetBrains Mono,monospace;font-size:1.7em;'
+                    f'font-weight:700;color:{regime["color"]};letter-spacing:0.04em">'
+                    f'{regime["regime"]}</div>',
                     sub_regime,
                 ),
                 unsafe_allow_html=True,
@@ -486,8 +486,8 @@ def render_breadth_dashboard() -> None:
                 hide_index=True,
                 column_config={
                     "Period":    st.column_config.TextColumn("Window", width="small"),
-                    "New Highs": st.column_config.NumberColumn("🟢 Highs", width="small"),
-                    "New Lows":  st.column_config.NumberColumn("🔴 Lows",  width="small"),
+                    "New Highs": st.column_config.NumberColumn("Highs", width="small"),
+                    "New Lows":  st.column_config.NumberColumn("Lows",  width="small"),
                 },
                 height=175,
             )
@@ -573,7 +573,7 @@ def render_breadth_dashboard() -> None:
 
     # ── Charts ──────────────────────────────────────────────────────────────
     st.markdown("---")
-    tab_ad, tab_mccl = st.tabs(["📈 Advance / Decline Line", "〰️ McClellan Oscillator"])
+    tab_ad, tab_mccl = st.tabs(["Advance / Decline Line", "McClellan Oscillator"])
 
     with tab_ad:
         ad = data["ad_line"]

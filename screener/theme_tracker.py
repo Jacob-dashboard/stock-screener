@@ -444,15 +444,15 @@ def build_rotation_quadrant(rows: list[ThemeRow]) -> go.Figure:
 
 def _heat_label(green_pct: float) -> str:
     if green_pct >= 70:
-        return "🟢 Bullish"
+        return "Bullish"
     if green_pct < 30:
-        return "🔴 Bearish"
-    return "🟡 Neutral"
+        return "Bearish"
+    return "Neutral"
 
 
 def render_theme_tracker(sort_by: str = "1 Week") -> None:
     """Main entry point for the Streamlit tab."""
-    st.subheader("🎯 Theme Rotation Tracker")
+    st.subheader("Theme Rotation Tracker")
     st.caption(
         "39 sector/theme ETFs · 1D / 1W / 1M / 3M / YTD returns · "
         "Rotation signals (INFLOW/OUTFLOW) · 15-min cache"
@@ -498,9 +498,9 @@ def render_theme_tracker(sort_by: str = "1 Week") -> None:
 
     c1, c2, c3, c4 = st.columns(4)
     if hottest:
-        c1.metric("🔥 Hottest (1W)", f"{hottest.theme}", f"{hottest.ret_1w:+.2f}%")
+        c1.metric("Hottest (1W)", f"{hottest.theme}", f"{hottest.ret_1w:+.2f}%")
     if coldest:
-        c2.metric("❄️ Coldest (1W)", f"{coldest.theme}", f"{coldest.ret_1w:+.2f}%")
+        c2.metric("Coldest (1W)", f"{coldest.theme}", f"{coldest.ret_1w:+.2f}%")
     c3.metric("Themes Green / Red (1W)", f"{green_1w} / {counts['1 Week']['red']}",
               f"{green_pct_1w:.0f}% green")
     c4.metric("Market Heat (1W)", heat)
@@ -508,7 +508,7 @@ def render_theme_tracker(sort_by: str = "1 Week") -> None:
     st.divider()
 
     # ── "Where's the money going?" ───────────────────────────────────────────
-    st.subheader("💸 Where's the Money Going?")
+    st.subheader("Where's the Money Going?")
     inflows = sorted(
         [r for r in rows if r.rotation == "INFLOW"],
         key=lambda r: -r.ret_1w,
@@ -520,7 +520,7 @@ def render_theme_tracker(sort_by: str = "1 Week") -> None:
 
     col_in, col_out = st.columns(2)
     with col_in:
-        st.markdown("**📈 Top Inflows (this week)**")
+        st.markdown("**Top Inflows (this week)**")
         if inflows:
             for r in inflows:
                 st.markdown(
@@ -532,7 +532,7 @@ def render_theme_tracker(sort_by: str = "1 Week") -> None:
         else:
             st.caption("No themes showing INFLOW signal.")
     with col_out:
-        st.markdown("**📉 Top Outflows (this week)**")
+        st.markdown("**Top Outflows (this week)**")
         if outflows:
             for r in outflows:
                 st.markdown(
@@ -552,7 +552,7 @@ def render_theme_tracker(sort_by: str = "1 Week") -> None:
     st.divider()
 
     # ── Returns table ────────────────────────────────────────────────────────
-    st.subheader("📊 Theme Returns + Rotation")
+    st.subheader("Theme Returns + Rotation")
 
     sort_attr = field_for.get(sort_by, "ret_1w")
     sorted_rows = sorted(
@@ -608,7 +608,7 @@ def render_theme_tracker(sort_by: str = "1 Week") -> None:
 
     csv = df.to_csv(index=False)
     st.download_button(
-        "⬇️ Download CSV",
+        "Download CSV",
         data=csv,
         file_name=f"theme_rotation_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
@@ -617,7 +617,7 @@ def render_theme_tracker(sort_by: str = "1 Week") -> None:
     st.divider()
 
     # ── Quadrant chart ───────────────────────────────────────────────────────
-    st.subheader("🗺️ Rotation Quadrant")
+    st.subheader("Rotation Quadrant")
     st.caption(
         "Identifies leadership rotation: **Leading** (TR) is where you want to be, "
         "**Improving** (BR) is where money is starting to flow, **Weakening** (TL) is "

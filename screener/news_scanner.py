@@ -24,34 +24,34 @@ _SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 
 # ── High-impact keyword categories ───────────────────────────────────────────
 IMPACT_KEYWORDS: dict[str, list[str]] = {
-    "🔴 Macro / Policy": [
+    "Macro / Policy": [
         "tariff", "tariffs", "trade war", "sanction", "sanctions", "executive order",
         "federal reserve", "fed rate", "rate hike", "rate cut", "interest rate",
         "inflation", "cpi", "pce", "gdp", "recession", "fomc", "powell",
         "treasury", "debt ceiling", "shutdown", "stimulus", "yellen",
         "trump", "biden", "white house", "potus", "congress", "senate",
     ],
-    "🟠 Earnings / Guidance": [
+    "Earnings / Guidance": [
         "earnings", "eps", "revenue", "guidance", "outlook", "beat", "miss",
         "quarterly results", "annual results", "forecast", "raised guidance",
         "lowered guidance", "profit warning", "preannounce",
     ],
-    "🟡 M&A / Corporate": [
+    "M&A / Corporate": [
         "merger", "acquisition", "takeover", "buyout", "deal", "acquires",
         "acqui-hire", "spinoff", "spin-off", "ipo", "secondary offering",
         "share buyback", "dividend", "special dividend",
     ],
-    "🔵 FDA / Biotech": [
+    "FDA / Biotech": [
         "fda", "fda approval", "fda approved", "clinical trial", "phase 3",
         "phase 2", "drug approval", "nda", "bla", "pdufa", "rejected",
         "complete response letter", "crl",
     ],
-    "🟣 Geo / Energy": [
+    "Geo / Energy": [
         "oil", "crude", "opec", "natural gas", "energy", "iran", "russia",
         "ukraine", "china", "north korea", "strait of hormuz", "war", "conflict",
         "ceasefire", "nato",
     ],
-    "⚪ Analyst / Upgrades": [
+    "Analyst / Upgrades": [
         "upgrade", "downgrade", "price target", "buy rating", "sell rating",
         "overweight", "underweight", "outperform", "underperform", "initiate",
     ],
@@ -94,12 +94,12 @@ def _score_headline(headline: str) -> tuple[int, list[str]]:
 
 def _impact_badge(score: int) -> str:
     if score >= 7:
-        return "🔴 HIGH"
+        return "HIGH"
     elif score >= 4:
-        return "🟡 MED"
+        return "MED"
     elif score >= 2:
-        return "🔵 LOW"
-    return "⬜ NONE"
+        return "LOW"
+    return "—"
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -152,7 +152,7 @@ def fetch_news(hours_back: int = 4, limit: int = 50, symbols: Optional[list[str]
 
 def render_news_scanner():
     """Render the news scanner tab content."""
-    st.subheader("📡 Breaking Market News")
+    st.subheader("Breaking Market News")
     st.caption("Powered by Alpaca News API · Auto-refreshes every 60s · Scored for market impact")
 
     # ── Controls ──────────────────────────────────────────────────────────────
@@ -168,7 +168,7 @@ def render_news_scanner():
     with col4:
         st.write("")
         st.write("")
-        refresh_btn = st.button("🔄 Refresh", use_container_width=True)
+        refresh_btn = st.button("Refresh", use_container_width=True)
 
     if refresh_btn:
         st.cache_data.clear()
@@ -193,8 +193,8 @@ def render_news_scanner():
     # ── Stats row ─────────────────────────────────────────────────────────────
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Headlines", len(df))
-    c2.metric("High Impact 🔴", len(df[df["score"] >= 7]))
-    c3.metric("Medium Impact 🟡", len(df[(df["score"] >= 4) & (df["score"] < 7)]))
+    c2.metric("High Impact", len(df[df["score"] >= 7]))
+    c3.metric("Medium Impact", len(df[(df["score"] >= 4) & (df["score"] < 7)]))
     c4.metric("Showing", len(filtered))
 
     st.divider()
@@ -202,20 +202,20 @@ def render_news_scanner():
     # ── High impact alerts (always shown) ────────────────────────────────────
     high_impact = df[df["score"] >= 7]
     if not high_impact.empty:
-        st.markdown("### 🚨 High Impact Alerts")
+        st.markdown("### High Impact Alerts")
         for _, row in high_impact.iterrows():
             with st.container():
                 col_l, col_r = st.columns([5, 1])
                 with col_l:
                     url_part = f"[{row['headline']}]({row['url']})" if row['url'] else row['headline']
                     st.markdown(f"**{url_part}**")
-                    st.caption(f"⏰ {row['time']}  ·  📰 {row['source']}  ·  🏷️ {row['symbols']}  ·  {row['categories']}")
+                    st.caption(f"{row['time']}  ·  {row['source']}  ·  {row['symbols']}  ·  {row['categories']}")
                 with col_r:
                     st.markdown(f"### {row['impact']}")
         st.divider()
 
     # ── Full feed table ───────────────────────────────────────────────────────
-    st.markdown("### 📰 News Feed")
+    st.markdown("### News Feed")
 
     display_df = filtered[["time", "impact", "headline", "symbols", "source", "categories"]].copy()
     display_df.columns = ["Time", "Impact", "Headline", "Symbols", "Source", "Categories"]
