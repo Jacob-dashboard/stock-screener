@@ -13,8 +13,12 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
-from alpaca.data.historical.news import NewsClient
-from alpaca.data.requests import NewsRequest
+try:
+    from alpaca.data.historical.news import NewsClient
+    from alpaca.data.requests import NewsRequest
+except ImportError:
+    NewsClient = None
+    NewsRequest = None
 
 # ── Credentials ───────────────────────────────────────────────────────────────
 # Read exclusively from environment — set ALPACA_API_KEY and ALPACA_SECRET_KEY
@@ -105,6 +109,8 @@ def _impact_badge(score: int) -> str:
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_news(hours_back: int = 4, limit: int = 50, symbols: Optional[list[str]] = None) -> pd.DataFrame:
     """Fetch and score recent news from Alpaca."""
+    if NewsClient is None or NewsRequest is None:
+        return pd.DataFrame()
     if not _API_KEY or not _SECRET_KEY:
         import logging
         logging.getLogger(__name__).warning(
