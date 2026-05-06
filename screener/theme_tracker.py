@@ -96,7 +96,7 @@ class ThemeRow:
 # ── Data fetch ─────────────────────────────────────────────────────────────────
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_theme_etfs(tickers: tuple[str, ...]) -> dict[str, pd.Series]:
     """
     Batch-download 1y of daily Close for all theme ETFs.

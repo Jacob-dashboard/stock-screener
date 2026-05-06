@@ -93,7 +93,7 @@ def get_sp500_tickers() -> list:
 
 # ── Heavy data fetches (15-minute TTL) ─────────────────────────────────────
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_sp500_close() -> pd.DataFrame:
     """
     Download 1 year of daily Close prices for all S&P 500 constituents.
@@ -120,7 +120,7 @@ def _fetch_sp500_close() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_spy_1y() -> pd.DataFrame:
     """SPY daily OHLCV for 1 year. 15-minute TTL."""
     try:
@@ -138,7 +138,7 @@ def _fetch_spy_1y() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_vix() -> pd.DataFrame:
     """VIX and VIX3M close prices for 3 months. 15-minute TTL."""
     try:
